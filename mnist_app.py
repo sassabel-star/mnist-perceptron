@@ -1,6 +1,6 @@
 """
-MNIST Single Perceptron — Streamlit App
-Run with: streamlit run mnist_app.py
+MNIST Classification - Single Layer Perceptron
+Using scikit-learn (no tensorflow) for Streamlit Cloud compatibility
 """
 
 import numpy as np
@@ -8,134 +8,124 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import streamlit as st
 from PIL import Image
-import io
+import struct, gzip, urllib.request, os
 
+from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import (
     classification_report, confusion_matrix,
     accuracy_score, precision_score, recall_score, f1_score,
 )
 from sklearn.model_selection import train_test_split
-from tensorflow.keras.datasets import mnist
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Flatten
-from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.optimizers import SGD
+from sklearn.preprocessing import StandardScaler
 
 # ─── Page Config ──────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="MNIST Perceptron",
-    page_icon="🧠",
-    layout="wide",
-)
+st.set_page_config(page_title="MNIST Perceptron", page_icon="🧠", layout="wide")
 
 st.markdown("""
     <style>
-    .main { background-color: #0e1117; }
     .block-container { padding-top: 2rem; }
     h1 { color: #00d4ff; font-family: 'Courier New', monospace; }
-    h2, h3 { color: #ffffff; }
-    .stMetric { background: #1e2130; border-radius: 10px; padding: 10px; }
     .stButton>button {
         background: linear-gradient(90deg, #00d4ff, #0077ff);
         color: white; border: none; border-radius: 8px;
         padding: 0.5rem 2rem; font-size: 1rem; font-weight: bold;
     }
-    .stButton>button:hover { opacity: 0.85; }
     </style>
 """, unsafe_allow_html=True)
 
 st.title("🧠 MNIST Single Perceptron Classifier")
-st.markdown("Train a single-layer perceptron on MNIST with **80% train / 20% test** split, then predict your own handwritten digit.")
+st.markdown("Train a single-layer perceptron on MNIST with **80% train / 20% test** split.")
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
-    epochs     = st.slider("Epochs",          5,  50, 30)
-    batch_size = st.slider("Batch Size",     32, 256, 128, step=32)
-    lr         = st.select_slider("Learning Rate", options=[0.001, 0.005, 0.01, 0.05, 0.1], value=0.01)
+    epochs = st.slider("Epochs", 5, 50, 30)
+    lr     = st.select_slider("Learning Rate", options=[0.0001, 0.001, 0.01, 0.1], value=0.001)
     st.markdown("---")
     st.markdown("**Model Architecture**")
     st.code("Input (784)\n   ↓\nDense(10, softmax)\n   ↓\nOutput (0–9)", language="text")
 
+# ─── Download MNIST ───────────────────────────────────────────────────────────
+def download_mnist():
+    base = "https://storage.googleapis.com/cvdf-datasets/mnist/"
+    files = {
+        "train_images": "train-images-idx3-ubyte.gz",
+        "train_labels": "train-labels-idx1-ubyte.gz",
+        "test_images":  "t10k-images-idx3-ubyte.gz",
+        "test_labels":  "t10k-labels-idx1-ubyte.gz",
+    }
+    data = {}
+    for key, fname in files.items():
+        if not os.path.exists(fname):
+            urllib.request.urlretrieve(base + fname, fname)
+        with gzip.open(fname, "rb") as f:
+            if "images" in key:
+                _, n, r, c = struct.unpack(">IIII", f.read(16))
+                data[key] = np.frombuffer(f.read(), np.uint8).reshape(n, r * c)
+            else:
+                f.read(8)
+                data[key] = np.frombuffer(f.read(), np.uint8)
+    X = np.concatenate([data["train_images"], data["test_images"]]).astype("float32") / 255.0
+    y = np.concatenate([data["train_labels"], data["test_labels"]])
+    return X, y
+
 # ─── Session State ────────────────────────────────────────────────────────────
-if "model"   not in st.session_state: st.session_state.model   = None
-if "history" not in st.session_state: st.session_state.history = None
-if "X_test"  not in st.session_state: st.session_state.X_test  = None
-if "y_test"  not in st.session_state: st.session_state.y_test  = None
-if "y_pred"  not in st.session_state: st.session_state.y_pred  = None
+for key in ["model", "history", "X_test", "y_test", "y_pred", "scaler", "X_test_display"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
 
-# ─── Train Button ─────────────────────────────────────────────────────────────
-col1, col2 = st.columns([1, 3])
-with col1:
-    train_btn = st.button("🚀 Train Model")
+# ─── Train ────────────────────────────────────────────────────────────────────
+if st.button("🚀 Train Model"):
+    with st.spinner("Downloading MNIST..."):
+        X, y = download_mnist()
+    st.success(f"✅ MNIST loaded — {len(X):,} samples")
 
-if train_btn:
-    with st.spinner("Downloading MNIST & training..."):
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.20, random_state=42, stratify=y
+    )
 
-        # Load & split
-        (X_all, y_all), (X_extra, y_extra) = mnist.load_data()
-        X_all = np.concatenate([X_all, X_extra])
-        y_all = np.concatenate([y_all, y_extra])
-        X_all = X_all.astype("float32") / 255.0
+    X_test_display = X_test.copy()  # save unscaled for showing images
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_all, y_all, test_size=0.20, random_state=42, stratify=y_all
-        )
+    scaler  = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test  = scaler.transform(X_test)
 
-        y_train_cat = to_categorical(y_train, 10)
+    progress = st.progress(0, text=f"Training epoch 1 / {epochs}")
+    val_acc_curve = []
 
-        # Build model
-        model = Sequential([
-            Flatten(input_shape=(28, 28)),
-            Dense(10, activation="softmax"),
-        ])
-        model.compile(
-            optimizer=SGD(learning_rate=lr),
-            loss="categorical_crossentropy",
-            metrics=["accuracy"],
-        )
+    model = SGDClassifier(
+        loss="log_loss", learning_rate="constant", eta0=lr,
+        max_iter=1, warm_start=True, random_state=42, n_jobs=-1,
+    )
 
-        # Progress bar
-        progress = st.progress(0, text="Training epoch 0 / " + str(epochs))
-        history_loss, history_val_loss = [], []
-        history_acc,  history_val_acc  = [], []
+    for epoch in range(epochs):
+        model.max_iter += 1
+        model.fit(X_train, y_train)
+        train_acc = model.score(X_train[:5000], y_train[:5000])
+        val_acc   = model.score(X_test[:2000],  y_test[:2000])
+        val_acc_curve.append(val_acc)
+        pct = int((epoch + 1) / epochs * 100)
+        progress.progress(pct, text=f"Epoch {epoch+1}/{epochs} — train acc: {train_acc:.3f} | val acc: {val_acc:.3f}")
 
-        class StreamlitCallback:
-            def on_epoch_end(self, epoch, logs=None):
-                pct = int((epoch + 1) / epochs * 100)
-                progress.progress(pct, text=f"Training epoch {epoch+1} / {epochs}  —  acc: {logs['accuracy']:.3f}")
-                history_loss.append(logs["loss"])
-                history_val_loss.append(logs["val_loss"])
-                history_acc.append(logs["accuracy"])
-                history_val_acc.append(logs["val_accuracy"])
+    progress.empty()
+    y_pred = model.predict(X_test)
 
-        from tensorflow.keras.callbacks import LambdaCallback
-        cb = LambdaCallback(on_epoch_end=lambda e, logs: StreamlitCallback().on_epoch_end(e, logs))
-
-        hist = model.fit(
-            X_train, y_train_cat,
-            epochs=epochs, batch_size=batch_size,
-            validation_split=0.1, verbose=0, callbacks=[cb],
-        )
-
-        progress.empty()
-
-        y_pred = np.argmax(model.predict(X_test, verbose=0), axis=1)
-
-        st.session_state.model   = model
-        st.session_state.history = hist.history
-        st.session_state.X_test  = X_test
-        st.session_state.y_test  = y_test
-        st.session_state.y_pred  = y_pred
-
+    st.session_state.model          = model
+    st.session_state.history        = val_acc_curve
+    st.session_state.X_test         = X_test
+    st.session_state.X_test_display = X_test_display
+    st.session_state.y_test         = y_test
+    st.session_state.y_pred         = y_pred
+    st.session_state.scaler         = scaler
     st.success("✅ Training complete!")
 
 # ─── Results ──────────────────────────────────────────────────────────────────
 if st.session_state.model is not None:
-    y_test = st.session_state.y_test
-    y_pred = st.session_state.y_pred
-    X_test = st.session_state.X_test
+    y_test  = st.session_state.y_test
+    y_pred  = st.session_state.y_pred
+    X_test  = st.session_state.X_test
     history = st.session_state.history
+    X_disp  = st.session_state.X_test_display
 
     st.markdown("---")
     st.header("📊 Metrics")
@@ -151,110 +141,81 @@ if st.session_state.model is not None:
     c3.metric("📡 Recall",    f"{rec*100:.2f}%")
     c4.metric("⚖️ F1-Score",  f"{f1*100:.2f}%")
 
-    # Per-class report
     with st.expander("📋 Full Classification Report"):
-        report = classification_report(y_test, y_pred, output_dict=True)
         import pandas as pd
-        df = pd.DataFrame(report).transpose().round(4)
-        st.dataframe(df, use_container_width=True)
+        report = classification_report(y_test, y_pred, output_dict=True)
+        st.dataframe(pd.DataFrame(report).transpose().round(4), use_container_width=True)
 
     st.markdown("---")
-    st.header("📉 Training Curves (Error)")
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4), facecolor="#0e1117")
-    ep = range(1, len(history["loss"]) + 1)
-    for ax in axes:
-        ax.set_facecolor("#1e2130")
-        ax.tick_params(colors="white")
-        for spine in ax.spines.values(): spine.set_edgecolor("#444")
-
-    axes[0].plot(ep, history["loss"],     color="#ff4b4b", lw=2, label="Train Loss")
-    axes[0].plot(ep, history["val_loss"], color="#ff4b4b", lw=2, ls="--", label="Val Loss")
-    axes[0].set_title("Loss over Epochs", color="white")
-    axes[0].set_xlabel("Epoch", color="white")
-    axes[0].legend(facecolor="#1e2130", labelcolor="white")
-    axes[0].grid(alpha=0.2)
-
-    axes[1].plot(ep, history["accuracy"],     color="#00d4ff", lw=2, label="Train Acc")
-    axes[1].plot(ep, history["val_accuracy"], color="#00d4ff", lw=2, ls="--", label="Val Acc")
-    axes[1].set_title("Accuracy over Epochs", color="white")
-    axes[1].set_xlabel("Epoch", color="white")
-    axes[1].legend(facecolor="#1e2130", labelcolor="white")
-    axes[1].grid(alpha=0.2)
-
+    st.header("📉 Training Curve (Error)")
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(range(1, len(history)+1), history, color="#00d4ff", lw=2, label="Val Accuracy")
+    ax.set_title("Accuracy over Epochs")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Accuracy")
+    ax.legend()
+    ax.grid(alpha=0.3)
     st.pyplot(fig)
 
     st.markdown("---")
     st.header("🔢 Confusion Matrix")
-
     cm = confusion_matrix(y_test, y_pred)
-    fig2, ax2 = plt.subplots(figsize=(9, 7), facecolor="#0e1117")
-    ax2.set_facecolor("#1e2130")
+    fig2, ax2 = plt.subplots(figsize=(9, 7))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-                xticklabels=range(10), yticklabels=range(10), ax=ax2, linewidths=0.3)
-    ax2.set_title("Confusion Matrix", color="white", fontsize=13)
-    ax2.set_xlabel("Predicted", color="white")
-    ax2.set_ylabel("True", color="white")
-    ax2.tick_params(colors="white")
+                xticklabels=range(10), yticklabels=range(10), ax=ax2)
+    ax2.set_title("Confusion Matrix")
+    ax2.set_xlabel("Predicted")
+    ax2.set_ylabel("True")
     st.pyplot(fig2)
 
     st.markdown("---")
     st.header("❌ Misclassified Examples")
-
     wrong_idx = np.where(y_pred != y_test)[0]
-    st.write(f"**{len(wrong_idx):,}** misclassified out of **{len(y_test):,}** — error rate: **{len(wrong_idx)/len(y_test)*100:.1f}%**")
+    st.write(f"**{len(wrong_idx):,}** misclassified — error rate: **{len(wrong_idx)/len(y_test)*100:.1f}%**")
 
-    fig3, axes3 = plt.subplots(3, 6, figsize=(13, 6), facecolor="#0e1117")
+    fig3, axes3 = plt.subplots(3, 6, figsize=(13, 6))
     for i, ax in enumerate(axes3.flat):
-        ax.set_facecolor("#0e1117")
         if i >= len(wrong_idx): ax.axis("off"); continue
         idx = wrong_idx[i]
-        ax.imshow(X_test[idx], cmap="gray")
+        ax.imshow(X_disp[idx].reshape(28, 28), cmap="gray")
         ax.set_title(f"T:{y_test[idx]} P:{y_pred[idx]}", color="red", fontsize=8)
         ax.axis("off")
     st.pyplot(fig3)
 
-    # ─── Predict Uploaded Image ───────────────────────────────────────────────
     st.markdown("---")
     st.header("🖼️ Predict Your Own Digit")
-    st.markdown("Upload a **28×28 grayscale image** of a handwritten digit (or any image — it will be resized).")
+    st.markdown("Upload a photo of a handwritten digit (0–9).")
 
     uploaded = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"])
-
     if uploaded:
-        img = Image.open(uploaded).convert("L").resize((28, 28))
+        img     = Image.open(uploaded).convert("L").resize((28, 28))
         img_arr = np.array(img).astype("float32") / 255.0
-
-        # Invert if background is white
         if img_arr.mean() > 0.5:
             img_arr = 1.0 - img_arr
 
         col_a, col_b = st.columns([1, 2])
         with col_a:
-            fig4, ax4 = plt.subplots(facecolor="#0e1117")
+            fig4, ax4 = plt.subplots()
             ax4.imshow(img_arr, cmap="gray")
-            ax4.set_facecolor("#0e1117")
             ax4.axis("off")
-            ax4.set_title("Your Image (28×28)", color="white")
+            ax4.set_title("Your Image (28×28)")
             st.pyplot(fig4)
 
         with col_b:
-            pred_probs = st.session_state.model.predict(img_arr.reshape(1, 28, 28), verbose=0)[0]
-            pred_digit = np.argmax(pred_probs)
-            confidence = pred_probs[pred_digit] * 100
+            img_scaled = st.session_state.scaler.transform(img_arr.reshape(1, -1))
+            pred_digit = st.session_state.model.predict(img_scaled)[0]
+            proba      = st.session_state.model.predict_proba(img_scaled)[0]
+            confidence = proba[pred_digit] * 100
 
             st.markdown(f"### Predicted Digit: **{pred_digit}**")
             st.markdown(f"Confidence: **{confidence:.1f}%**")
 
-            fig5, ax5 = plt.subplots(figsize=(7, 3), facecolor="#0e1117")
-            ax5.set_facecolor("#1e2130")
-            bars = ax5.bar(range(10), pred_probs * 100,
-                           color=["#00d4ff" if i == pred_digit else "#444" for i in range(10)])
+            fig5, ax5 = plt.subplots(figsize=(7, 3))
+            ax5.bar(range(10), proba * 100,
+                    color=["#00d4ff" if i == pred_digit else "#cccccc" for i in range(10)])
             ax5.set_xticks(range(10))
-            ax5.set_xlabel("Digit", color="white")
-            ax5.set_ylabel("Confidence (%)", color="white")
-            ax5.set_title("Prediction Probabilities", color="white")
-            ax5.tick_params(colors="white")
-            for spine in ax5.spines.values(): spine.set_edgecolor("#444")
+            ax5.set_xlabel("Digit")
+            ax5.set_ylabel("Confidence (%)")
+            ax5.set_title("Prediction Probabilities")
             ax5.grid(alpha=0.2)
             st.pyplot(fig5)
